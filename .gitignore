@@ -1,0 +1,20 @@
+.env
+
+# Database — too big, different per machine
+chroma_db/
+
+# Temporary downloaded files
+data/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment (if you use one)
+venv/
+.venv/
+
+# IDE files
+.vscode/
+.idea/
