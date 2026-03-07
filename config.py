@@ -20,4 +20,4 @@ TOP_K = 3
 CHROMA_DB_PATH = "./chroma_db"
 
 DATA_DIR = "./data"
-MAX_FILE_SIZE = 20
+MAX_FILE_SIZE_MB = 20
