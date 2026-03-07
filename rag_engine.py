@@ -9,6 +9,44 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 conversation_history = {}
 MAX_HISTORY = 10
 
+def transcribe_audio(file_path):
+    """Convert a voice message to text using Groq Whisper.
+    
+    Args:
+        file_path: path to the audio file
+    
+    Returns:
+        dict with text and success
+    """
+    try:
+        with open(file_path, "rb") as audio_file:
+            transcription = groq_client.audio.transcriptions.create(
+                file=audio_file,
+                model="whisper-large-v3-turbo",
+            )
+
+        text = transcription.text.strip()
+
+        if not text:
+            return {
+                "text": "",
+                "success": False,
+                "error": "Could not understand the audio"
+            }
+
+        return {
+            "text": text,
+            "success": True,
+            "error": None
+        }
+
+    except Exception as e:
+        return {
+            "text": "",
+            "success": False,
+            "error": str(e)
+        }
+
 def get_history(user_id):
     """Get conversation history for a user."""
     if user_id not in conversation_history:

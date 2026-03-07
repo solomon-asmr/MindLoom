@@ -4,8 +4,7 @@ from telegram.ext import (
     MessageHandler, filters
 )
 from config import TELEGRAM_BOT_TOKEN
-from bot import start, help_command, handle_button, handle_message, handle_file
-
+from bot import start, help_command, handle_button, handle_message, handle_file, handle_voice
 # Set up logging so you can see errors in the terminal
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -43,6 +42,9 @@ def main():
 
     # File handler (must be before text handler)
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+
+     # Voice handler
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
     # Text message handler (must be last)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

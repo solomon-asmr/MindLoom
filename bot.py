@@ -5,7 +5,7 @@ from telegram.ext import (
 )
 from rag_engine import (
     process_document, process_url, process_urls,
-    ask_question, scan_website, clear_history
+    ask_question, scan_website, clear_history, transcribe_audio
 )
 from user_manager import get_user_sources, get_user_stats, delete_source, clear_user_data
 from document_loader import get_supported_extensions
@@ -57,7 +57,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "   • Send me PDF, TXT, DOCX, or CSV files\n"
         "   • Send me a website URL\n\n"
         "2️⃣ Ask questions:\n"
-        "   • Click 'Ask Question' or just type your question\n"
+        "   • Type your question\n"
+        "   • Or send a voice message 🎤\n"
         "   • I'll find the answer from YOUR materials\n\n"
         "3️⃣ Manage your data:\n"
         "   • View what's in your knowledge base\n"
@@ -65,7 +66,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Your data is completely private — only you can see it!",
         reply_markup=get_main_menu()
     )
-
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all button clicks."""
@@ -110,7 +110,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["state"] = "asking_question"
         await query.edit_message_text(
             "❓ Go ahead, ask me anything about your materials!\n\n"
-            "Just type your question.",
+            "Type your question or send a voice message 🎤",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu")]
             ])
@@ -543,4 +543,110 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ])
     )
-    
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle when a user sends a voice message."""
+    user_id = update.effective_user.id
+    voice = update.message.voice
+
+    if not voice:
+        return
+
+    # Check duration — skip very long voice messages
+    if voice.duration > 120:
+        await update.message.reply_text(
+            "❌ Voice message too long (max 2 minutes).\n\n"
+            "Please send a shorter message.",
+            reply_markup=get_main_menu()
+        )
+        return
+
+    # Check if user has any data
+    stats = get_user_stats(user_id)
+    if stats["total_chunks"] == 0:
+        await update.message.reply_text(
+            "📚 Your knowledge base is empty!\n\n"
+            "Add some documents or websites first, then I can answer your questions.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📄 Add Document", callback_data="add_doc"),
+                    InlineKeyboardButton("🌐 Add Website", callback_data="add_web"),
+                ],
+                [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
+            ])
+        )
+        return
+
+    processing_msg = await update.message.reply_text("🎤 Converting your voice message to text...")
+
+    file_path = None
+
+    try:
+        await send_typing(update)
+
+        # Download the voice file
+        os.makedirs(DATA_DIR, exist_ok=True)
+        file_path = os.path.join(DATA_DIR, f"{user_id}_voice.ogg")
+
+        tg_file = await voice.get_file()
+        await tg_file.download_to_drive(file_path)
+
+        # Transcribe
+        transcription = transcribe_audio(file_path)
+
+        if not transcription["success"]:
+            await processing_msg.edit_text(
+                f"❌ Could not understand the voice message.\n\n"
+                f"Please try again or type your question instead.",
+                reply_markup=get_main_menu()
+            )
+            return
+
+        question = transcription["text"]
+
+        await processing_msg.edit_text(
+            f"🎤 I heard: \"{question}\"\n\n"
+            f"🔍 Searching your materials..."
+        )
+
+        await send_typing(update)
+
+        # Now do the normal RAG pipeline
+        result = ask_question(user_id, question)
+
+        answer = result["answer"]
+        sources = result["sources"]
+
+        response = f"🎤 You asked: \"{question}\"\n\n"
+        response += f"🤖 {answer}"
+
+        if sources:
+            response += "\n\n📚 Sources:\n"
+            for source in sources:
+                short = source[:40] + "..." if len(source) > 40 else source
+                response += f"  • {short}\n"
+
+        if len(response) > 4000:
+            response = response[:4000] + "\n\n... (response truncated)"
+
+        await processing_msg.edit_text(
+            response,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("❓ Ask Another", callback_data="ask"),
+                    InlineKeyboardButton("🔙 Menu", callback_data="menu"),
+                ]
+            ])
+        )
+
+    except Exception as e:
+        await processing_msg.edit_text(
+            "❌ Something went wrong processing your voice message.\n\n"
+            "Please try again or type your question instead.",
+            reply_markup=get_main_menu()
+        )
+
+    finally:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
