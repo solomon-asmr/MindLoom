@@ -6,6 +6,29 @@ from web_scraper import scan_links, scrape_page, scrape_multiple_pages
 from user_manager import add_to_collection, search_collection
 
 groq_client = Groq(api_key=GROQ_API_KEY)
+conversation_history = {}
+MAX_HISTORY = 10
+
+def get_history(user_id):
+    """Get conversation history for a user."""
+    if user_id not in conversation_history:
+        conversation_history[user_id] = []
+    return conversation_history[user_id]
+
+
+def add_to_history(user_id, role, content):
+    """Add a message to the user's conversation history."""
+    history = get_history(user_id)
+    history.append({"role": role, "content": content})
+
+    # Keep only the last MAX_HISTORY messages
+    if len(history) > MAX_HISTORY:
+        conversation_history[user_id] = history[-MAX_HISTORY:]
+
+
+def clear_history(user_id):
+    """Clear conversation history for a user."""
+    conversation_history[user_id] = []
 
 def process_document(user_id, file_path, source_name=None):
     """Process a document and add it to the user's knowledge base.
@@ -130,24 +153,14 @@ def scan_website(url):
     """
     return scan_links(url)
 
-
 def ask_question(user_id, question):
-    """Search the user's knowledge base and generate an answer.
-    
-    Args:
-        user_id: Telegram user ID
-        question: the user's question
-    
-    Returns:
-        dict with answer, sources, chunks_used
-    """
-    # Step 1: RETRIEVE — search for relevant chunks
+    """Search the user's knowledge base and generate an answer."""
+    # Step 1: RETRIEVE
     search_results = search_collection(user_id, question, top_k=TOP_K)
 
     documents = search_results["documents"]
     sources = search_results["sources"]
 
-    # If no documents found, tell the user
     if not documents:
         return {
             "answer": "Your knowledge base is empty. Please add some documents or websites first!",
@@ -155,27 +168,31 @@ def ask_question(user_id, question):
             "chunks_used": 0
         }
 
-    # Step 2: AUGMENT — build the prompt with retrieved chunks
+    # Step 2: AUGMENT — build the prompt with context AND history
     context = "\n\n".join(documents)
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a helpful study assistant. "
-                "Answer the question using ONLY the provided context. "
-                "If the context doesn't contain enough information to answer, "
-                "say 'I don't have enough information about that in your materials.' "
-                "Be clear and concise. When possible, mention which source the information comes from."
-            )
-        },
-        {
-            "role": "user",
-            "content": f"Context:\n{context}\n\nQuestion:\n{question}"
-        }
-    ]
+    system_message = {
+        "role": "system",
+        "content": (
+            "You are a helpful study assistant. "
+            "Answer the question using ONLY the provided context. "
+            "If the context doesn't contain enough information to answer, "
+            "say 'I don't have enough information about that in your materials.' "
+            "Be clear and concise. When possible, mention which source the information comes from."
+        )
+    }
 
-    # Step 3: GENERATE — send to LLM
+    # Build messages: system + history + new question with context
+    history = get_history(user_id)
+
+    messages = [system_message]
+    messages.extend(history)
+    messages.append({
+        "role": "user",
+        "content": f"Context:\n{context}\n\nQuestion:\n{question}"
+    })
+
+    # Step 3: GENERATE
     try:
         response = groq_client.chat.completions.create(
             model=LLM_MODEL,
@@ -184,6 +201,10 @@ def ask_question(user_id, question):
         )
 
         answer = response.choices[0].message.content
+
+        # Save this exchange to history
+        add_to_history(user_id, "user", question)
+        add_to_history(user_id, "assistant", answer)
 
         return {
             "answer": answer,

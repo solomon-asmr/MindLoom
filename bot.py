@@ -5,7 +5,7 @@ from telegram.ext import (
 )
 from rag_engine import (
     process_document, process_url, process_urls,
-    ask_question, scan_website
+    ask_question, scan_website, clear_history
 )
 from user_manager import get_user_sources, get_user_stats, delete_source, clear_user_data
 from document_loader import get_supported_extensions
@@ -34,6 +34,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
 
     context.user_data["state"] = "idle"
+    clear_history(user.id)
 
     await update.message.reply_text(
         f"👋 Welcome {user.first_name}!\n\n"
