@@ -1,6 +1,6 @@
-# 🤖 Study Assistant Bot
+# 🤖 Personal Assistant Bot
 
-A Telegram chatbot that lets anyone upload their study materials and ask questions about them using AI. Powered by RAG (Retrieval Augmented Generation), it finds relevant information from your documents and generates accurate answers.
+A Telegram chatbot that lets anyone upload their materials and ask questions about them using AI. Powered by RAG (Retrieval Augmented Generation), it finds relevant information from your documents and generates accurate answers.
 
 Each user gets their own **private knowledge base** — your data is never shared with other users.
 
@@ -50,7 +50,7 @@ The bot remembers your recent messages, so you can ask follow-up questions like 
 ## 📁 Project Structure
 
 ```
-study-assistant-bot/
+MindLoom/
 ├── config.py              # API keys and settings
 ├── document_loader.py     # Read PDF, TXT, DOCX, CSV files
 ├── web_scraper.py         # Scan URLs, find links, scrape pages
@@ -95,8 +95,8 @@ This allows the LLM to answer questions based on **your specific documents** rat
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/YOUR_USERNAME/study-assistant-bot.git
-   cd study-assistant-bot
+   git clone https://github.com/YOUR_USERNAME/MindLoom.git
+   cd MindLoom
    ```
 
 2. **Create and activate a virtual environment**
@@ -139,18 +139,6 @@ Click **❓ Ask Question** and type your question — or simply send a voice mes
 
 ### Managing Your Data
 Click **📚 My Knowledge Base** to see all your sources, how many chunks each contains, and options to delete individual sources or clear everything.
-
----
-
-## 🌐 Deployment
-
-The bot can be deployed on **Oracle Cloud Free Tier** for 24/7 operation at zero cost.
-
-1. Create a free Oracle Cloud account
-2. Launch an Ubuntu VM (ARM, 1 OCPU, 6GB RAM — always free)
-3. Clone the repo, install dependencies, create `.env`
-4. Set up a systemd service for auto-restart and boot persistence
-5. Bot runs forever — even survives server reboots
 
 ---
 
