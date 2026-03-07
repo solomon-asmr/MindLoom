@@ -7,7 +7,7 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-LLM_MODEL = os.getenv("openai/gpt-oss-20b")
+LLM_MODEL = "openai/gpt-oss-20b"
 LLM_TEMPERATURE = 0
 
 CHUNK_SIZE = 500
