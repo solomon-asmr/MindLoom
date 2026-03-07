@@ -1,4 +1,6 @@
 import os
+os.environ['CHROMA_TELEMETRY_MOUNT'] = 'False'
+os.environ['ANONYMIZED_TELEMETRY'] = 'False'
 from dotenv import load_dotenv
 load_dotenv()
 
