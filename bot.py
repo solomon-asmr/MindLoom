@@ -5,7 +5,8 @@ from telegram.ext import (
 )
 from rag_engine import (
     process_document, process_url, process_urls,
-    ask_question, scan_website, clear_history, transcribe_audio
+    ask_question, scan_website, clear_history,
+    transcribe_audio, text_to_speech
 )
 from user_manager import get_user_sources, get_user_stats, delete_source, clear_user_data
 from document_loader import get_supported_extensions
@@ -42,7 +43,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"👋 Welcome {user.first_name}!\n\n"
-        f"I'm your personal study assistant. "
+        f"I'm your personal assistant. "
         f"Upload documents or websites, then ask me anything about them!\n\n"
         f"Your data is private — only you can see it.\n\n"
         f"What would you like to do?",
@@ -53,7 +54,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle the /help command."""
     await update.message.reply_text(
         "❔ How to use this bot:\n\n"
-        "1️⃣ Add your study materials:\n"
+        "1️⃣ Add your materials:\n"
         "   • Send me PDF, TXT, DOCX, or CSV files\n"
         "   • Send me a website URL\n\n"
         "2️⃣ Ask questions:\n"
@@ -122,7 +123,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "help":
         await query.edit_message_text(
             "❔ How to use this bot:\n\n"
-            "1️⃣ Add your study materials (PDFs, websites)\n"
+            "1️⃣ Add your materials (PDFs, websites)\n"
             "2️⃣ Click 'Ask Question'\n"
             "3️⃣ Type your question\n"
             "4️⃣ I'll find the answer from YOUR materials\n\n"
@@ -544,7 +545,6 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
-
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle when a user sends a voice message."""
     user_id = update.effective_user.id
@@ -553,7 +553,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not voice:
         return
 
-    # Check duration — skip very long voice messages
     if voice.duration > 120:
         await update.message.reply_text(
             "❌ Voice message too long (max 2 minutes).\n\n"
@@ -562,7 +561,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Check if user has any data
     stats = get_user_stats(user_id)
     if stats["total_chunks"] == 0:
         await update.message.reply_text(
@@ -580,25 +578,26 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     processing_msg = await update.message.reply_text("🎤 Converting your voice message to text...")
 
-    file_path = None
+    voice_input_path = None
+    voice_output_path = None
 
     try:
         await send_typing(update)
 
         # Download the voice file
         os.makedirs(DATA_DIR, exist_ok=True)
-        file_path = os.path.join(DATA_DIR, f"{user_id}_voice.ogg")
+        voice_input_path = os.path.join(DATA_DIR, f"{user_id}_voice_in.ogg")
 
         tg_file = await voice.get_file()
-        await tg_file.download_to_drive(file_path)
+        await tg_file.download_to_drive(voice_input_path)
 
-        # Transcribe
-        transcription = transcribe_audio(file_path)
+        # Transcribe speech to text
+        transcription = transcribe_audio(voice_input_path)
 
         if not transcription["success"]:
             await processing_msg.edit_text(
-                f"❌ Could not understand the voice message.\n\n"
-                f"Please try again or type your question instead.",
+                "❌ Could not understand the voice message.\n\n"
+                "Please try again or type your question instead.",
                 reply_markup=get_main_menu()
             )
             return
@@ -612,12 +611,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await send_typing(update)
 
-        # Now do the normal RAG pipeline
+        # RAG pipeline
         result = ask_question(user_id, question)
 
         answer = result["answer"]
         sources = result["sources"]
 
+        # Build text response
         response = f"🎤 You asked: \"{question}\"\n\n"
         response += f"🤖 {answer}"
 
@@ -630,15 +630,55 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(response) > 4000:
             response = response[:4000] + "\n\n... (response truncated)"
 
-        await processing_msg.edit_text(
-            response,
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("❓ Ask Another", callback_data="ask"),
-                    InlineKeyboardButton("🔙 Menu", callback_data="menu"),
-                ]
-            ])
-        )
+        # Send the text response
+        await processing_msg.edit_text(response)
+
+        # Now generate voice response
+        # Detect if the answer is mostly English or Arabic (TTS supported languages)
+        def is_tts_supported(text):
+            """Check if text is mostly English or Arabic characters."""
+            english_arabic = 0
+            other = 0
+            for char in text:
+                if char.isascii() or '\u0600' <= char <= '\u06FF':
+                    english_arabic += 1
+                elif char.isalpha():
+                    other += 1
+            total = english_arabic + other
+            if total == 0:
+                return False
+            return (english_arabic / total) > 0.5
+
+        # Only generate voice if the answer is in a supported language
+        voice_output_path = os.path.join(DATA_DIR, f"{user_id}_voice_out.wav")
+        tts_result = {"success": False}
+
+        if is_tts_supported(answer):
+            await send_typing(update)
+            tts_result = text_to_speech(answer, voice_output_path)
+        if tts_result["success"]:
+            # Send voice message
+            with open(voice_output_path, "rb") as audio:
+                await update.message.reply_voice(
+                    voice=audio,
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("❓ Ask Another", callback_data="ask"),
+                            InlineKeyboardButton("🔙 Menu", callback_data="menu"),
+                        ]
+                    ])
+                )
+        else:
+            await update.message.reply_text(
+                "🔇 Voice reply is only available in English and Arabic. "
+                "Your text answer is above!",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("❓ Ask Another", callback_data="ask"),
+                        InlineKeyboardButton("🔙 Menu", callback_data="menu"),
+                    ]
+                ])
+            )
 
     except Exception as e:
         await processing_msg.edit_text(
@@ -648,5 +688,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     finally:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
+        # Clean up both audio files
+        if voice_input_path and os.path.exists(voice_input_path):
+            os.remove(voice_input_path)
+        if voice_output_path and os.path.exists(voice_output_path):
+            os.remove(voice_output_path)

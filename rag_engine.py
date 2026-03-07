@@ -47,6 +47,144 @@ def transcribe_audio(file_path):
             "error": str(e)
         }
 
+
+def text_to_speech(text, file_path):
+    """Convert text to speech using Groq Orpheus.
+    Splits long text into chunks and combines the audio.
+    
+    Args:
+        text: the text to convert to audio
+        file_path: where to save the audio file
+    
+    Returns:
+        dict with success and error
+    """
+    import wave
+    import os
+
+    try:
+        # Split text into chunks under 200 characters at sentence boundaries
+        chunks = _split_text_for_tts(text)
+
+        if not chunks:
+            return {"success": False, "error": "No text to convert"}
+
+        # Generate audio for each chunk
+        temp_files = []
+        for i, chunk in enumerate(chunks):
+            temp_path = file_path.replace(".wav", f"_part{i}.wav")
+            temp_files.append(temp_path)
+
+            response = groq_client.audio.speech.create(
+                model="canopylabs/orpheus-v1-english",
+                voice="hannah",
+                input=chunk,
+                response_format="wav"
+            )
+            response.write_to_file(temp_path)
+
+        # If only one chunk, just rename it
+        if len(temp_files) == 1:
+            os.rename(temp_files[0], file_path)
+            return {"success": True, "error": None}
+
+        # Combine all audio files into one
+        _combine_wav_files(temp_files, file_path)
+
+        # Clean up temp files
+        for temp in temp_files:
+            if os.path.exists(temp):
+                os.remove(temp)
+
+        return {"success": True, "error": None}
+
+    except Exception as e:
+        print(f"TTS Error: {e}")
+        # Clean up any temp files on error
+        for temp in temp_files if 'temp_files' in dir() else []:
+            if os.path.exists(temp):
+                os.remove(temp)
+        return {"success": False, "error": str(e)}
+
+
+def _split_text_for_tts(text, max_length=190):
+    """Split text into chunks under max_length, breaking at sentence boundaries."""
+    # Clean up the text
+    text = text.strip()
+    if not text:
+        return []
+
+    # If short enough, return as is
+    if len(text) <= max_length:
+        return [text]
+
+    # Split into sentences
+    sentences = []
+    for part in text.split(". "):
+        part = part.strip()
+        if part:
+            if not part.endswith("."):
+                part += "."
+            sentences.append(part)
+
+    # Group sentences into chunks
+    chunks = []
+    current_chunk = ""
+
+    for sentence in sentences:
+        # If single sentence is too long, split by commas
+        if len(sentence) > max_length:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = ""
+            
+            # Split long sentence by commas
+            parts = sentence.split(", ")
+            for part in parts:
+                part = part.strip()
+                if len(current_chunk) + len(part) + 2 < max_length:
+                    current_chunk += ", " + part if current_chunk else part
+                else:
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                    current_chunk = part
+        
+        elif len(current_chunk) + len(sentence) + 1 < max_length:
+            current_chunk += " " + sentence if current_chunk else sentence
+        else:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = sentence
+
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+
+    return chunks
+
+
+def _combine_wav_files(input_files, output_file):
+    """Combine multiple WAV files into one."""
+    import wave
+
+    # Read the first file to get audio parameters
+    with wave.open(input_files[0], 'rb') as first:
+        params = first.getparams()
+        frames = [first.readframes(first.getnframes())]
+
+    # Read remaining files
+    for file_path in input_files[1:]:
+        with wave.open(file_path, 'rb') as wf:
+            frames.append(wf.readframes(wf.getnframes()))
+
+    # Write combined file
+    with wave.open(output_file, 'wb') as output:
+        output.setnchannels(params.nchannels)
+        output.setsampwidth(params.sampwidth)
+        output.setframerate(params.framerate)
+        # Don't set nframes — let Python calculate it from the data
+        for frame_data in frames:
+            output.writeframes(frame_data)
+
 def get_history(user_id):
     """Get conversation history for a user."""
     if user_id not in conversation_history:
@@ -215,8 +353,12 @@ def ask_question(user_id, question):
             "You are a helpful study assistant. "
             "Answer the question using ONLY the provided context. "
             "If the context doesn't contain enough information to answer, "
-            "say 'I don't have enough information about that in your materials.' "
-            "Be clear and concise. When possible, mention which source the information comes from."
+            "say you don't have enough information in the user's language. "
+            "IMPORTANT: Always answer in the SAME LANGUAGE the user asked in. "
+            "If the user asks in Hebrew, answer in Hebrew. "
+            "If the user asks in Amharic, answer in Amharic. "
+            "If the user asks in English, answer in English. "
+            "Be clear and concise."
         )
     }
 
