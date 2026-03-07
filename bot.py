@@ -12,6 +12,10 @@ from document_loader import get_supported_extensions
 from config import DATA_DIR, MAX_FILE_SIZE_MB
 import os
 
+async def send_typing(update):
+    """Show 'typing...' indicator in Telegram."""
+    await update.effective_chat.send_action("typing")
+
 def get_main_menu():
     """Create the main menu buttons."""
     keyboard = [
@@ -214,6 +218,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_ext = os.path.splitext(file_name)[1].lower()
     supported = get_supported_extensions()
 
+    # Check 1: Supported file type?
     if file_ext not in supported:
         await update.message.reply_text(
             f"❌ Unsupported file type: {file_ext}\n\n"
@@ -222,6 +227,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Check 2: File size OK?
     file_size_mb = document.file_size / (1024 * 1024)
     if file_size_mb > MAX_FILE_SIZE_MB:
         await update.message.reply_text(
@@ -231,22 +237,41 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text("⏳ Processing your file...")
+    # Show processing indicator
+    processing_msg = await update.message.reply_text(
+        f"⏳ Processing {file_name}...\n"
+        f"This may take a moment."
+    )
+
+    file_path = None
 
     try:
+        await send_typing(update)
+
+        # Download file
         os.makedirs(DATA_DIR, exist_ok=True)
         file_path = os.path.join(DATA_DIR, f"{user_id}_{file_name}")
 
         tg_file = await document.get_file()
         await tg_file.download_to_drive(file_path)
 
+        # Check 3: File not empty?
+        if os.path.getsize(file_path) == 0:
+            await processing_msg.edit_text(
+                f"❌ {file_name} appears to be empty.",
+                reply_markup=get_main_menu()
+            )
+            return
+
+        await send_typing(update)
+
+        # Process the document
         result = process_document(user_id, file_path, file_name)
 
-        os.remove(file_path)
-
         if result["success"]:
-            await update.message.reply_text(
-                f"✅ Added {result['chunks_added']} chunks from {file_name}!",
+            await processing_msg.edit_text(
+                f"✅ Successfully processed {file_name}!\n\n"
+                f"📊 {result['chunks_added']} chunks added to your knowledge base.",
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton("📄 Add More", callback_data="add_doc"),
@@ -256,16 +281,25 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ])
             )
         else:
-            await update.message.reply_text(
-                f"❌ Error processing {file_name}: {result['error']}",
+            await processing_msg.edit_text(
+                f"❌ Could not process {file_name}\n\n"
+                f"Reason: {result['error']}\n\n"
+                f"Please check the file and try again.",
                 reply_markup=get_main_menu()
             )
 
     except Exception as e:
-        await update.message.reply_text(
-            f"❌ Something went wrong: {str(e)}",
+        await processing_msg.edit_text(
+            f"❌ Something went wrong while processing {file_name}\n\n"
+            f"Please try again. If the problem continues, try a different file.",
             reply_markup=get_main_menu()
         )
+
+    finally:
+        # Always clean up the temp file, even if something crashed
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -289,46 +323,76 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     url = update.message.text.strip()
 
-    await update.message.reply_text("🔍 Scanning page for links...")
-
-    links = scan_website(url)
-
-    if not links:
-        await update.message.reply_text("No other links found. Adding this page only...")
-        result = process_url(user_id, url)
-
-        if result["success"]:
-            await update.message.reply_text(
-                f"✅ Added {result['chunks_added']} chunks from this page!",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("🌐 Add More", callback_data="add_web"),
-                        InlineKeyboardButton("❓ Ask Question", callback_data="ask"),
-                    ],
-                    [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
-                ])
-            )
-        else:
-            await update.message.reply_text(
-                f"❌ Error: {result['error']}",
-                reply_markup=get_main_menu()
-            )
+    # Basic URL validation
+    if not url.startswith("http://") and not url.startswith("https://"):
+        await update.message.reply_text(
+            "❌ That doesn't look like a valid URL.\n\n"
+            "URLs should start with http:// or https://",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu")]
+            ])
+        )
         return
 
-    context.user_data["pending_links"] = links
-    context.user_data["state"] = "selecting_links"
+    processing_msg = await update.message.reply_text("🔍 Scanning page for links...")
 
-    message = f"Found {len(links)} links:\n\n"
-    for i, link in enumerate(links):
-        icon = "🔵" if link["is_internal"] else "🌐"
-        title = link["title"][:50] or link["url"][:50]
-        message += f"{i+1}. {icon} {title}\n"
+    try:
+        await send_typing(update)
 
-    message += "\nReply with numbers to include (e.g., 1, 3, 5)\n"
-    message += "Or type 'all' for everything.\n"
-    message += "Type 'cancel' to go back."
+        links = scan_website(url)
 
-    await update.message.reply_text(message)
+        if not links:
+            await processing_msg.edit_text("No other links found. Adding this page only...")
+            await send_typing(update)
+
+            result = process_url(user_id, url)
+
+            if result["success"]:
+                await processing_msg.edit_text(
+                    f"✅ Added {result['chunks_added']} chunks from this page!",
+                    reply_markup=InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("🌐 Add More", callback_data="add_web"),
+                            InlineKeyboardButton("❓ Ask Question", callback_data="ask"),
+                        ],
+                        [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
+                    ])
+                )
+            else:
+                await processing_msg.edit_text(
+                    f"❌ Could not scrape this page.\n\n"
+                    f"Reason: {result['error']}\n\n"
+                    f"The website might be blocking automated access.",
+                    reply_markup=get_main_menu()
+                )
+            return
+
+        context.user_data["pending_links"] = links
+        context.user_data["state"] = "selecting_links"
+
+        message = f"Found {len(links)} links:\n\n"
+        for i, link in enumerate(links):
+            icon = "🔵" if link["is_internal"] else "🌐"
+            title = link["title"][:50] or link["url"][:50]
+            message += f"{i+1}. {icon} {title}\n"
+
+        message += "\nReply with numbers to include (e.g., 1, 3, 5)\n"
+        message += "Or type 'all' for everything.\n"
+        message += "Type 'cancel' to go back."
+
+        await processing_msg.edit_text(message)
+
+    except Exception as e:
+        await processing_msg.edit_text(
+            "❌ Could not access this URL.\n\n"
+            "Possible reasons:\n"
+            "• The URL might be incorrect\n"
+            "• The website might be down\n"
+            "• The website might be blocking bots\n\n"
+            "Please check the URL and try again.",
+            reply_markup=get_main_menu()
+        )
+
 
 async def handle_link_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle when user selects which links to scrape."""
@@ -345,12 +409,14 @@ async def handle_link_selection(update: Update, context: ContextTypes.DEFAULT_TY
 
     if text == "cancel":
         context.user_data["state"] = "idle"
+        context.user_data["pending_links"] = []
         await update.message.reply_text(
             "Cancelled!",
             reply_markup=get_main_menu()
         )
         return
 
+    # Parse selection
     if text == "all":
         selected = links
     else:
@@ -359,44 +425,66 @@ async def handle_link_selection(update: Update, context: ContextTypes.DEFAULT_TY
             selected = [links[n] for n in numbers if 0 <= n < len(links)]
         except (ValueError, IndexError):
             await update.message.reply_text(
-                "❌ Invalid input. Use numbers separated by commas (e.g., 1, 3, 5)\n"
-                "Or type 'all' or 'cancel'."
+                "❌ Invalid input.\n\n"
+                "Use numbers separated by commas: 1, 3, 5\n"
+                "Or type 'all' for everything\n"
+                "Or type 'cancel' to go back"
             )
             return
 
     if not selected:
-        await update.message.reply_text("No valid links selected. Try again.")
+        await update.message.reply_text(
+            "❌ No valid links selected.\n\n"
+            "The numbers should be from the list above."
+        )
         return
 
     urls = [link["url"] for link in selected]
-    await update.message.reply_text(f"📥 Scraping {len(urls)} pages... This may take a moment.")
-
-    results = process_urls(user_id, urls)
-
-    summary = ""
-    total_chunks = 0
-    for result in results:
-        if result["success"]:
-            summary += f"✅ {result['source'][:40]}: {result['chunks_added']} chunks\n"
-            total_chunks += result["chunks_added"]
-        else:
-            summary += f"❌ {result['source'][:40]}: {result['error']}\n"
-
-    summary += f"\nTotal: {total_chunks} chunks added"
-
-    context.user_data["state"] = "idle"
-    context.user_data["pending_links"] = []
-
-    await update.message.reply_text(
-        summary,
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🌐 Add More", callback_data="add_web"),
-                InlineKeyboardButton("❓ Ask Question", callback_data="ask"),
-            ],
-            [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
-        ])
+    processing_msg = await update.message.reply_text(
+        f"📥 Scraping {len(urls)} pages...\n"
+        f"This may take a moment."
     )
+
+    try:
+        await send_typing(update)
+        results = process_urls(user_id, urls)
+
+        summary = ""
+        total_chunks = 0
+        for result in results:
+            if result["success"]:
+                short_source = result['source'][:40]
+                summary += f"✅ {short_source}: {result['chunks_added']} chunks\n"
+                total_chunks += result["chunks_added"]
+            else:
+                short_source = result['source'][:40]
+                summary += f"❌ {short_source}: failed\n"
+
+        summary += f"\n📊 Total: {total_chunks} chunks added"
+
+        context.user_data["state"] = "idle"
+        context.user_data["pending_links"] = []
+
+        await processing_msg.edit_text(
+            summary,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🌐 Add More", callback_data="add_web"),
+                    InlineKeyboardButton("❓ Ask Question", callback_data="ask"),
+                ],
+                [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
+            ])
+        )
+
+    except Exception as e:
+        context.user_data["state"] = "idle"
+        context.user_data["pending_links"] = []
+        await processing_msg.edit_text(
+            "❌ Something went wrong while scraping.\n\n"
+            "Please try again.",
+            reply_markup=get_main_menu()
+        )
+
 
 async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle when a user asks a question."""
@@ -410,10 +498,24 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id,
-        action="typing"
-    )
+    # Check if user has any data
+    stats = get_user_stats(user_id)
+    if stats["total_chunks"] == 0:
+        await update.message.reply_text(
+            "📚 Your knowledge base is empty!\n\n"
+            "Add some documents or websites first, then I can answer your questions.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📄 Add Document", callback_data="add_doc"),
+                    InlineKeyboardButton("🌐 Add Website", callback_data="add_web"),
+                ],
+                [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
+            ])
+        )
+        return
+
+    # Show typing indicator
+    await send_typing(update)
 
     result = ask_question(user_id, question)
 
@@ -428,6 +530,10 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
             short = source[:40] + "..." if len(source) > 40 else source
             response += f"  • {short}\n"
 
+    # Telegram has a 4096 character limit per message
+    if len(response) > 4000:
+        response = response[:4000] + "\n\n... (response truncated)"
+
     await update.message.reply_text(
         response,
         reply_markup=InlineKeyboardMarkup([
@@ -437,5 +543,4 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ])
     )
-
-
+    
