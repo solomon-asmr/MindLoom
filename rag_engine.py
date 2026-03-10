@@ -4,7 +4,7 @@ from chunker import split_into_chunks
 from document_loader import load_document
 from web_scraper import scan_links, scrape_page, scrape_multiple_pages
 from user_manager import add_to_collection, search_collection
-
+import base64
 groq_client = Groq(api_key=GROQ_API_KEY)
 conversation_history = {}
 MAX_HISTORY = 10
@@ -105,6 +105,126 @@ def text_to_speech(text, file_path):
             if os.path.exists(temp):
                 os.remove(temp)
         return {"success": False, "error": str(e)}
+
+def analyze_image(file_path):
+    """Analyze an image and extract all information from it.
+    
+    Args:
+        file_path: path to the image file
+    
+    Returns:
+        dict with text, success, error
+    """
+    try:
+        # Step 1: Read the image and convert to base64
+        with open(file_path, "rb") as image_file:
+            image_data = base64.b64encode(image_file.read()).decode("utf-8")
+
+        # Step 2: Detect the image type
+        if file_path.lower().endswith(".png"):
+            media_type = "image/png"
+        elif file_path.lower().endswith(".gif"):
+            media_type = "image/gif"
+        elif file_path.lower().endswith(".webp"):
+            media_type = "image/webp"
+        else:
+            media_type = "image/jpeg"
+
+        # Step 3: Send to the vision model
+        response = groq_client.chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Analyze this image deeply and extract ALL information. "
+                                "Include:\n"
+                                "1. Any text visible in the image (transcribe it exactly)\n"
+                                "2. Any numbers, equations, or formulas\n"
+                                "3. Any diagrams, charts, or tables (describe them in detail)\n"
+                                "4. Any objects, people, or scenes\n"
+                                "5. The overall context and purpose of the image\n\n"
+                                "Be as thorough and detailed as possible."
+                            )
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{media_type};base64,{image_data}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            temperature=0,
+            max_completion_tokens=2048
+        )
+
+        text = response.choices[0].message.content
+
+        if not text:
+            return {
+                "text": "",
+                "success": False,
+                "error": "Could not analyze the image"
+            }
+
+        return {
+            "text": text,
+            "success": True,
+            "error": None
+        }
+
+    except Exception as e:
+        print(f"Vision Error: {e}")
+        return {
+            "text": "",
+            "success": False,
+            "error": str(e)
+        }
+
+def process_image(user_id, file_path, source_name=None, add_to_kb=True):
+    """Analyze an image and optionally add the extracted text to knowledge base.
+    
+    Args:
+        user_id: Telegram user ID
+        file_path: path to the image file
+        source_name: display name
+        add_to_kb: whether to add extracted text to knowledge base
+    
+    Returns:
+        dict with analysis, chunks_added, success
+    """
+    # Step 1: Analyze the image
+    result = analyze_image(file_path)
+
+    if not result["success"]:
+        return {
+            "analysis": "",
+            "chunks_added": 0,
+            "success": False,
+            "error": result["error"]
+        }
+
+    analysis = result["text"]
+
+    # Step 2: Optionally store in knowledge base
+    chunks_added = 0
+    if add_to_kb and analysis:
+        name = source_name or "image"
+        chunks = split_into_chunks(analysis)
+        if chunks:
+            chunks_added = add_to_collection(user_id, chunks, name, "image")
+
+    return {
+        "analysis": analysis,
+        "chunks_added": chunks_added,
+        "success": True,
+        "error": None
+    }
 
 
 def _split_text_for_tts(text, max_length=190):
@@ -398,6 +518,8 @@ def ask_question(user_id, question):
             "sources": [],
             "chunks_used": 0
         }
+
+
 
 
 if __name__ == "__main__":

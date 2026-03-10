@@ -6,7 +6,7 @@ from telegram.ext import (
 from rag_engine import (
     process_document, process_url, process_urls,
     ask_question, scan_website, clear_history,
-    transcribe_audio, text_to_speech
+    transcribe_audio, text_to_speech, process_image
 )
 from user_manager import get_user_sources, get_user_stats, delete_source, clear_user_data
 from document_loader import get_supported_extensions
@@ -57,6 +57,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1️⃣ Add your materials:\n"
         "   • Send me PDF, TXT, DOCX, or CSV files\n"
         "   • Send me a website URL\n\n"
+        "   • Send me a photo or screenshot 🖼️\n\n"
         "2️⃣ Ask questions:\n"
         "   • Type your question\n"
         "   • Or send a voice message 🎤\n"
@@ -91,6 +92,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• Text files (.txt)\n"
             "• Word documents (.docx)\n"
             "• CSV files (.csv)\n\n"
+            "• Photos and screenshots 🖼️\n\n"
             f"Maximum file size: {MAX_FILE_SIZE_MB}MB",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔙 Back to Menu", callback_data="menu")]
@@ -693,3 +695,78 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(voice_input_path)
         if voice_output_path and os.path.exists(voice_output_path):
             os.remove(voice_output_path)
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle when a user sends a photo."""
+    user_id = update.effective_user.id
+
+    # Get the largest version of the photo
+    photo = update.message.photo[-1]
+
+    processing_msg = await update.message.reply_text(
+        "🔍 Analyzing your image... This may take a moment."
+    )
+
+    file_path = None
+
+    try:
+        await send_typing(update)
+
+        # Download the photo
+        os.makedirs(DATA_DIR, exist_ok=True)
+        file_path = os.path.join(DATA_DIR, f"{user_id}_photo.jpg")
+
+        tg_file = await photo.get_file()
+        await tg_file.download_to_drive(file_path)
+
+        await send_typing(update)
+
+        # Analyze the image
+        result = process_image(
+            user_id,
+            file_path,
+            source_name=f"image_{photo.file_unique_id}",
+            add_to_kb=True
+        )
+
+        if result["success"]:
+            analysis = result["analysis"]
+
+            # Truncate for Telegram's 4096 char limit
+            if len(analysis) > 3800:
+                analysis = analysis[:3800] + "\n\n... (truncated)"
+
+            response = f"🖼️ Image Analysis:\n\n{analysis}"
+
+            if result["chunks_added"] > 0:
+                response += f"\n\n✅ Added {result['chunks_added']} chunks to your knowledge base."
+                response += "\nYou can now ask questions about this image!"
+
+            await processing_msg.edit_text(
+                response,
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("❓ Ask About It", callback_data="ask"),
+                        InlineKeyboardButton("🔙 Menu", callback_data="menu"),
+                    ]
+                ])
+            )
+        else:
+            await processing_msg.edit_text(
+                f"❌ Could not analyze the image.\n\n"
+                f"Reason: {result['error']}\n\n"
+                f"Please try a clearer image.",
+                reply_markup=get_main_menu()
+            )
+
+    except Exception as e:
+        await processing_msg.edit_text(
+            "❌ Something went wrong analyzing the image.\n\n"
+            "Please try again.",
+            reply_markup=get_main_menu()
+        )
+
+    finally:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
