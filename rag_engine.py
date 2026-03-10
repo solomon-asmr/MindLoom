@@ -1,5 +1,5 @@
 from groq import Groq
-from config import GROQ_API_KEY, LLM_MODEL, LLM_TEMPERATURE, TOP_K
+from config import GROQ_API_KEY, LLM_MODEL, LLM_TEMPERATURE, TOP_K, CATEGORIES
 from chunker import split_into_chunks
 from document_loader import load_document
 from web_scraper import scan_links, scrape_page, scrape_multiple_pages
@@ -186,19 +186,8 @@ def analyze_image(file_path):
             "error": str(e)
         }
 
-def process_image(user_id, file_path, source_name=None, add_to_kb=True):
-    """Analyze an image and optionally add the extracted text to knowledge base.
-    
-    Args:
-        user_id: Telegram user ID
-        file_path: path to the image file
-        source_name: display name
-        add_to_kb: whether to add extracted text to knowledge base
-    
-    Returns:
-        dict with analysis, chunks_added, success
-    """
-    # Step 1: Analyze the image
+def process_image(user_id, file_path, source_name=None, add_to_kb=True, category=None):
+    """Analyze an image and optionally add to knowledge base."""
     result = analyze_image(file_path)
 
     if not result["success"]:
@@ -206,24 +195,28 @@ def process_image(user_id, file_path, source_name=None, add_to_kb=True):
             "analysis": "",
             "chunks_added": 0,
             "success": False,
-            "error": result["error"]
+            "error": result["error"],
+            "category": "general"
         }
 
     analysis = result["text"]
 
-    # Step 2: Optionally store in knowledge base
     chunks_added = 0
     if add_to_kb and analysis:
+        if not category:
+            category = detect_category(analysis)
+
         name = source_name or "image"
         chunks = split_into_chunks(analysis)
         if chunks:
-            chunks_added = add_to_collection(user_id, chunks, name, "image")
+            chunks_added = add_to_collection(user_id, chunks, name, "image", category)
 
     return {
         "analysis": analysis,
         "chunks_added": chunks_added,
         "success": True,
-        "error": None
+        "error": None,
+        "category": category or "general"
     }
 
 
@@ -326,22 +319,11 @@ def clear_history(user_id):
     """Clear conversation history for a user."""
     conversation_history[user_id] = []
 
-def process_document(user_id, file_path, source_name=None):
-    """Process a document and add it to the user's knowledge base.
-    
-    Args:
-        user_id: Telegram user ID
-        file_path: path to the file
-        source_name: display name (defaults to filename)
-    
-    Returns:
-        dict with source, chunks_added, success
-    """
+def process_document(user_id, file_path, source_name=None, category=None):
+    """Process a document and add it to the user's knowledge base."""
     try:
-        # Step 1: Extract text from the file
         text = load_document(file_path, analyze_images_fn=analyze_image)
 
-        # Step 2: Split into chunks
         chunks = split_into_chunks(text)
 
         if not chunks:
@@ -349,18 +331,23 @@ def process_document(user_id, file_path, source_name=None):
                 "source": source_name or file_path,
                 "chunks_added": 0,
                 "success": False,
-                "error": "No text could be extracted"
+                "error": "No text could be extracted",
+                "category": "general"
             }
 
-        # Step 3: Store in user's collection
+        # Auto-detect category if not provided
+        if not category:
+            category = detect_category(text)
+
         name = source_name or file_path.split("/")[-1]
-        chunks_added = add_to_collection(user_id, chunks, name, "document")
+        chunks_added = add_to_collection(user_id, chunks, name, "document", category)
 
         return {
             "source": name,
             "chunks_added": chunks_added,
             "success": True,
-            "error": None
+            "error": None,
+            "category": category
         }
 
     except Exception as e:
@@ -368,21 +355,13 @@ def process_document(user_id, file_path, source_name=None):
             "source": source_name or file_path,
             "chunks_added": 0,
             "success": False,
-            "error": str(e)
+            "error": str(e),
+            "category": "general"
         }
 
-def process_url(user_id, url):
-    """Scrape a URL and add its content to the user's knowledge base.
-    
-    Args:
-        user_id: Telegram user ID
-        url: the webpage URL
-    
-    Returns:
-        dict with source, chunks_added, success
-    """
+def process_url(user_id, url, category=None):
+    """Scrape a URL and add its content to the user's knowledge base."""
     try:
-        # Step 1: Scrape the page
         text = scrape_page(url)
 
         if not text:
@@ -390,10 +369,10 @@ def process_url(user_id, url):
                 "source": url,
                 "chunks_added": 0,
                 "success": False,
-                "error": "No content found on page"
+                "error": "No content found on page",
+                "category": "general"
             }
 
-        # Step 2: Split into chunks
         chunks = split_into_chunks(text)
 
         if not chunks:
@@ -401,17 +380,21 @@ def process_url(user_id, url):
                 "source": url,
                 "chunks_added": 0,
                 "success": False,
-                "error": "No chunks created"
+                "error": "No chunks created",
+                "category": "general"
             }
 
-        # Step 3: Store in user's collection
-        chunks_added = add_to_collection(user_id, chunks, url, "webpage")
+        if not category:
+            category = detect_category(text)
+
+        chunks_added = add_to_collection(user_id, chunks, url, "webpage", category)
 
         return {
             "source": url,
             "chunks_added": chunks_added,
             "success": True,
-            "error": None
+            "error": None,
+            "category": category
         }
 
     except Exception as e:
@@ -419,10 +402,12 @@ def process_url(user_id, url):
             "source": url,
             "chunks_added": 0,
             "success": False,
-            "error": str(e)
+            "error": str(e),
+            "category": "general"
         }
 
-def process_urls(user_id, urls):
+
+def process_urls(user_id, urls, category=None):
     """Scrape multiple URLs and add their content.
     
     Args:
@@ -434,7 +419,7 @@ def process_urls(user_id, urls):
     """
     results = []
     for url in urls:
-        result = process_url(user_id, url)
+        result = process_url(user_id, url, category=category)
         results.append(result)
     return results
 
@@ -451,8 +436,11 @@ def scan_website(url):
 
 def ask_question(user_id, question):
     """Search the user's knowledge base and generate an answer."""
-    # Step 1: RETRIEVE
-    search_results = search_collection(user_id, question, top_k=TOP_K)
+    # Step 0: ROUTE — detect which categories to search
+    categories = detect_question_categories(question)
+
+    # Step 1: RETRIEVE with category filtering
+    search_results = search_collection(user_id, question, top_k=TOP_K, categories=categories)
 
     documents = search_results["documents"]
     sources = search_results["sources"]
@@ -461,28 +449,25 @@ def ask_question(user_id, question):
         return {
             "answer": "Your knowledge base is empty. Please add some documents or websites first!",
             "sources": [],
-            "chunks_used": 0
+            "chunks_used": 0,
+            "categories_searched": categories
         }
 
-    # Step 2: AUGMENT — build the prompt with context AND history
+    # Step 2: AUGMENT
     context = "\n\n".join(documents)
 
     system_message = {
         "role": "system",
         "content": (
-            "You are a helpful study assistant. "
+            "You are a helpful personal assistant. "
             "Answer the question using ONLY the provided context. "
             "If the context doesn't contain enough information to answer, "
             "say you don't have enough information in the user's language. "
             "IMPORTANT: Always answer in the SAME LANGUAGE the user asked in. "
-            "If the user asks in Hebrew, answer in Hebrew. "
-            "If the user asks in Amharic, answer in Amharic. "
-            "If the user asks in English, answer in English. "
             "Be clear and concise."
         )
     }
 
-    # Build messages: system + history + new question with context
     history = get_history(user_id)
 
     messages = [system_message]
@@ -502,24 +487,128 @@ def ask_question(user_id, question):
 
         answer = response.choices[0].message.content
 
-        # Save this exchange to history
         add_to_history(user_id, "user", question)
         add_to_history(user_id, "assistant", answer)
 
         return {
             "answer": answer,
             "sources": sources,
-            "chunks_used": len(documents)
+            "chunks_used": len(documents),
+            "categories_searched": categories
         }
 
     except Exception as e:
         return {
             "answer": f"Sorry, I encountered an error: {str(e)}",
             "sources": [],
-            "chunks_used": 0
+            "chunks_used": 0,
+            "categories_searched": categories
         }
 
 
+def detect_category(text):
+    """Use the LLM to detect which category a document belongs to.
+    
+    Args:
+        text: sample text from the document (first 1000 chars)
+    
+    Returns:
+        category key (e.g., "work", "health", "general")
+    """
+    category_list = "\n".join([
+        f"- {key}: {info['label']}"
+        for key, info in CATEGORIES.items()
+    ])
+
+    try:
+        response = groq_client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a document classifier. "
+                        "Based on the text provided, determine which single category "
+                        "best fits this document. Respond with ONLY the category key, "
+                        "nothing else. No explanation, no punctuation, just the key."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Categories:\n{category_list}\n\nDocument text:\n{text[:1000]}"
+                }
+            ],
+            temperature=0,
+            max_completion_tokens=20
+        )
+
+        detected = response.choices[0].message.content.strip().lower()
+
+        # Make sure the response is a valid category
+        if detected in CATEGORIES:
+            return detected
+        
+        # If LLM returned the label instead of the key, find the key
+        for key, info in CATEGORIES.items():
+            if key in detected:
+                return key
+
+        return "general"
+
+    except Exception:
+        return "general"
+
+
+def detect_question_categories(question):
+    """Detect which categories a question might relate to.
+    
+    Args:
+        question: the user's question
+    
+    Returns:
+        list of category keys, or ["all"] if unclear
+    """
+    category_list = "\n".join([
+        f"- {key}: {info['label']}"
+        for key, info in CATEGORIES.items()
+    ])
+
+    try:
+        response = groq_client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a query router. Based on the question, determine which "
+                        "categories of documents would most likely contain the answer. "
+                        "Respond with ONLY the category keys separated by commas. "
+                        "If the question is general or could span multiple categories, "
+                        "respond with 'all'. No explanation, just the keys."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"Categories:\n{category_list}\n\nQuestion:\n{question}"
+                }
+            ],
+            temperature=0,
+            max_completion_tokens=50
+        )
+
+        result = response.choices[0].message.content.strip().lower()
+
+        if "all" in result:
+            return ["all"]
+
+        # Parse the comma-separated categories
+        categories = [c.strip() for c in result.split(",")]
+        valid = [c for c in categories if c in CATEGORIES]
+
+        return valid if valid else ["all"]
+
+    except Exception:
+        return ["all"]
 
 
 if __name__ == "__main__":

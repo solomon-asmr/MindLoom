@@ -10,14 +10,15 @@ def get_user_collection(user_id):
     collection = chroma_client.get_or_create_collection(collection_name)
     return collection
 
-def add_to_collection(user_id, chunks, source_name, source_type):
-    """Add text chunks to a user's collection.
+def add_to_collection(user_id, chunks, source_name, source_type, category="general"):
+    """Add text chunks to a user's collection with category metadata.
     
     Args:
         user_id: Telegram user ID
         chunks: list of text strings
-        source_name: name of the source (e.g., "notes.pdf")
-        source_type: "document" or "webpage"
+        source_name: name of the source
+        source_type: "document", "webpage", or "image"
+        category: category tag for filtering
     
     Returns:
         Number of chunks added
@@ -27,15 +28,13 @@ def add_to_collection(user_id, chunks, source_name, source_type):
 
     collection = get_user_collection(user_id)
 
-    # Create unique IDs for each chunk
-    # We use source_name + index so they don't clash with other sources
     ids = [f"{source_name}_chunk_{i}" for i in range(len(chunks))]
 
-    # Create metadata for each chunk (so we know where it came from)
     metadatas = [
         {
             "source": source_name,
             "type": source_type,
+            "category": category,
             "chunk_index": i
         }
         for i in range(len(chunks))
@@ -49,13 +48,14 @@ def add_to_collection(user_id, chunks, source_name, source_type):
 
     return len(chunks)
 
-def search_collection(user_id, query, top_k=3):
-    """Hybrid search: combines vector search and BM25 keyword search.
+def search_collection(user_id, query, top_k=3, categories=None):
+    """Hybrid search with optional category filtering.
     
     Args:
         user_id: Telegram user ID
         query: the user's question
         top_k: how many results to return
+        categories: list of category keys to filter by, or None for all
     
     Returns:
         dict with "documents" and "sources" keys
@@ -65,14 +65,36 @@ def search_collection(user_id, query, top_k=3):
     if collection.count() == 0:
         return {"documents": [], "sources": []}
 
-    total_docs = collection.count()
-    fetch_k = min(top_k * 3, total_docs)  # fetch more for reranking
+    # Build the where filter for categories
+    where_filter = None
+    if categories and "all" not in categories:
+        if len(categories) == 1:
+            where_filter = {"category": categories[0]}
+        else:
+            where_filter = {"category": {"$in": categories}}
 
-    # ===== STEP 1: Vector search (semantic) =====
-    vector_results = collection.query(
-        query_texts=[query],
-        n_results=fetch_k
-    )
+    # ===== STEP 1: Vector search =====
+    total_docs = collection.count()
+    fetch_k = min(top_k * 3, total_docs)
+
+    try:
+        if where_filter:
+            vector_results = collection.query(
+                query_texts=[query],
+                n_results=fetch_k,
+                where=where_filter
+            )
+        else:
+            vector_results = collection.query(
+                query_texts=[query],
+                n_results=fetch_k
+            )
+    except Exception:
+        # If filtered search fails (no docs match filter), search all
+        vector_results = collection.query(
+            query_texts=[query],
+            n_results=fetch_k
+        )
 
     vector_docs = vector_results["documents"][0] if vector_results["documents"] else []
     vector_ids = vector_results["ids"][0] if vector_results["ids"] else []
@@ -82,21 +104,34 @@ def search_collection(user_id, query, top_k=3):
         return {"documents": [], "sources": []}
 
     # ===== STEP 2: BM25 keyword search =====
-    # Get ALL documents for BM25 (it needs the full corpus)
-    all_data = collection.get(include=["documents", "metadatas"])
+    if where_filter:
+        try:
+            all_data = collection.get(include=["documents", "metadatas"], where=where_filter)
+        except Exception:
+            all_data = collection.get(include=["documents", "metadatas"])
+    else:
+        all_data = collection.get(include=["documents", "metadatas"])
+
     all_docs = all_data["documents"]
     all_ids = all_data["ids"]
     all_metadatas = all_data["metadatas"]
 
-    # Tokenize documents for BM25 (split into words)
+    if not all_docs:
+        # No docs match filter, return vector results only
+        documents = vector_docs[:top_k]
+        sources = []
+        for meta in vector_metadatas[:top_k]:
+            source = meta.get("source", "Unknown")
+            if source not in sources:
+                sources.append(source)
+        return {"documents": documents, "sources": sources}
+
     tokenized_corpus = [doc.lower().split() for doc in all_docs]
     tokenized_query = query.lower().split()
 
-    # Create BM25 index and get scores
     bm25 = BM25Okapi(tokenized_corpus)
     bm25_scores = bm25.get_scores(tokenized_query)
 
-    # Get top BM25 results
     bm25_top_indices = sorted(
         range(len(bm25_scores)),
         key=lambda i: bm25_scores[i],
@@ -108,11 +143,10 @@ def search_collection(user_id, query, top_k=3):
     bm25_metadatas = [all_metadatas[i] for i in bm25_top_indices]
 
     # ===== STEP 3: Reciprocal Rank Fusion =====
-    rrf_scores = {}  # doc_id → score
-    doc_map = {}     # doc_id → {document, metadata}
-    k = 60  # RRF constant
+    rrf_scores = {}
+    doc_map = {}
+    k = 60
 
-    # Score vector results
     for rank, doc_id in enumerate(vector_ids):
         rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1.0 / (rank + k)
         doc_map[doc_id] = {
@@ -120,7 +154,6 @@ def search_collection(user_id, query, top_k=3):
             "metadata": vector_metadatas[rank]
         }
 
-    # Score BM25 results
     for rank, doc_id in enumerate(bm25_ids):
         rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1.0 / (rank + k)
         if doc_id not in doc_map:
@@ -129,7 +162,7 @@ def search_collection(user_id, query, top_k=3):
                 "metadata": bm25_metadatas[rank]
             }
 
-    # ===== STEP 4: Sort by combined score and return top_k =====
+    # ===== STEP 4: Sort and return =====
     sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
     top_ids = sorted_ids[:top_k]
 

@@ -8,9 +8,13 @@ from rag_engine import (
     ask_question, scan_website, clear_history,
     transcribe_audio, text_to_speech, process_image
 )
-from user_manager import get_user_sources, get_user_stats, delete_source, clear_user_data
+from user_manager import (
+    get_user_sources, get_user_stats, 
+    delete_source, clear_user_data,
+    get_user_collection
+)
 from document_loader import get_supported_extensions
-from config import DATA_DIR, MAX_FILE_SIZE_MB
+from config import DATA_DIR, MAX_FILE_SIZE_MB, CATEGORIES
 import os
 
 async def send_typing(update):
@@ -156,6 +160,59 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "You can start fresh by adding new materials!",
             reply_markup=get_main_menu()
         )
+    elif action.startswith("retag_"):
+        source_name = action.replace("retag_", "")
+        context.user_data["retag_source"] = source_name
+
+        keyboard = []
+        row = []
+        for key, info in CATEGORIES.items():
+            row.append(InlineKeyboardButton(
+                info["label"],
+                callback_data=f"setcat_{key}_{source_name}"
+            ))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+        keyboard.append([InlineKeyboardButton("🔙 Cancel", callback_data="menu")])
+
+        await query.edit_message_text(
+            "🏷️ Choose the correct category:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif action.startswith("setcat_"):
+        parts = action.replace("setcat_", "").split("_", 1)
+        new_category = parts[0]
+        source_name = parts[1] if len(parts) > 1 else ""
+
+        # Update metadata for all chunks from this source
+        collection = get_user_collection(user_id)
+        all_data = collection.get(include=["metadatas", "documents"])
+
+        for i, metadata in enumerate(all_data["metadatas"]):
+            if metadata.get("source") == source_name:
+                metadata["category"] = new_category
+                collection.update(
+                    ids=[all_data["ids"][i]],
+                    metadatas=[metadata]
+                )
+
+        cat_label = CATEGORIES.get(new_category, {}).get("label", "📝 General")
+
+        await query.edit_message_text(
+            f"✅ Updated category to {cat_label}!",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📄 Add More", callback_data="add_doc"),
+                    InlineKeyboardButton("❓ Ask Question", callback_data="ask"),
+                ],
+                [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
+            ])
+        )
 
     elif action.startswith("delete_"):
         source_name = action.replace("delete_", "")
@@ -272,13 +329,18 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = process_document(user_id, file_path, file_name)
 
         if result["success"]:
+            cat_key = result.get("category", "general")
+            cat_label = CATEGORIES.get(cat_key, {}).get("label", "📝 General")
+
             await processing_msg.edit_text(
                 f"✅ Successfully processed {file_name}!\n\n"
-                f"📊 {result['chunks_added']} chunks added to your knowledge base.",
+                f"📊 {result['chunks_added']} chunks added\n"
+                f"🏷️ Category: {cat_label}\n\n"
+                f"Is the category correct?",
                 reply_markup=InlineKeyboardMarkup([
                     [
-                        InlineKeyboardButton("📄 Add More", callback_data="add_doc"),
-                        InlineKeyboardButton("❓ Ask Question", callback_data="ask"),
+                        InlineKeyboardButton("✅ Yes", callback_data="ask"),
+                        InlineKeyboardButton("🏷️ Change", callback_data=f"retag_{file_name}"),
                     ],
                     [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
                 ])
@@ -351,12 +413,17 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result = process_url(user_id, url)
 
             if result["success"]:
+                cat_key = result.get("category", "general")
+                cat_label = CATEGORIES.get(cat_key, {}).get("label", "📝 General")
+
                 await processing_msg.edit_text(
-                    f"✅ Added {result['chunks_added']} chunks from this page!",
+                    f"✅ Added {result['chunks_added']} chunks from this page!\n"
+                    f"🏷️ Category: {cat_label}\n\n"
+                    f"Is the category correct?",
                     reply_markup=InlineKeyboardMarkup([
                         [
-                            InlineKeyboardButton("🌐 Add More", callback_data="add_web"),
-                            InlineKeyboardButton("❓ Ask Question", callback_data="ask"),
+                            InlineKeyboardButton("✅ Yes", callback_data="ask"),
+                            InlineKeyboardButton("🏷️ Change", callback_data=f"retag_{url[:50]}"),
                         ],
                         [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
                     ])
@@ -454,16 +521,26 @@ async def handle_link_selection(update: Update, context: ContextTypes.DEFAULT_TY
 
         summary = ""
         total_chunks = 0
+        detected_categories = []
+
         for result in results:
             if result["success"]:
                 short_source = result['source'][:40]
-                summary += f"✅ {short_source}: {result['chunks_added']} chunks\n"
+                cat_key = result.get("category", "general")
+                cat_label = CATEGORIES.get(cat_key, {}).get("label", "📝 General")
+                summary += f"✅ {short_source}: {result['chunks_added']} chunks ({cat_label})\n"
                 total_chunks += result["chunks_added"]
+                if cat_key not in detected_categories:
+                    detected_categories.append(cat_key)
             else:
                 short_source = result['source'][:40]
                 summary += f"❌ {short_source}: failed\n"
 
         summary += f"\n📊 Total: {total_chunks} chunks added"
+
+        if detected_categories:
+            cat_labels = [CATEGORIES.get(c, {}).get("label", c) for c in detected_categories]
+            summary += f"\n🏷️ Categories: {', '.join(cat_labels)}"
 
         context.user_data["state"] = "idle"
         context.user_data["pending_links"] = []
@@ -532,6 +609,11 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for source in sources:
             short = source[:40] + "..." if len(source) > 40 else source
             response += f"  • {short}\n"
+
+    categories_searched = result.get("categories_searched", ["all"])
+    if categories_searched and categories_searched != ["all"]:
+        cat_labels = [CATEGORIES.get(c, {}).get("label", c) for c in categories_searched]
+        response += f"\n🔍 Searched: {', '.join(cat_labels)}"
 
     # Telegram has a 4096 character limit per message
     if len(response) > 4000:
@@ -732,24 +814,26 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if result["success"]:
             analysis = result["analysis"]
+            cat_key = result.get("category", "general")
+            cat_label = CATEGORIES.get(cat_key, {}).get("label", "📝 General")
 
-            # Truncate for Telegram's 4096 char limit
-            if len(analysis) > 3800:
-                analysis = analysis[:3800] + "\n\n... (truncated)"
+            if len(analysis) > 3600:
+                analysis = analysis[:3600] + "\n\n... (truncated)"
 
             response = f"🖼️ Image Analysis:\n\n{analysis}"
 
             if result["chunks_added"] > 0:
-                response += f"\n\n✅ Added {result['chunks_added']} chunks to your knowledge base."
-                response += "\nYou can now ask questions about this image!"
+                response += f"\n\n✅ Added {result['chunks_added']} chunks"
+                response += f"\n🏷️ Category: {cat_label}"
 
             await processing_msg.edit_text(
                 response,
                 reply_markup=InlineKeyboardMarkup([
                     [
-                        InlineKeyboardButton("❓ Ask About It", callback_data="ask"),
-                        InlineKeyboardButton("🔙 Menu", callback_data="menu"),
-                    ]
+                        InlineKeyboardButton("✅ Category OK", callback_data="ask"),
+                        InlineKeyboardButton("🏷️ Change", callback_data=f"retag_image_{photo.file_unique_id}"),
+                    ],
+                    [InlineKeyboardButton("🔙 Menu", callback_data="menu")]
                 ])
             )
         else:
