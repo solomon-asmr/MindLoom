@@ -339,7 +339,7 @@ def process_document(user_id, file_path, source_name=None):
     """
     try:
         # Step 1: Extract text from the file
-        text = load_document(file_path)
+        text = load_document(file_path, analyze_images_fn=analyze_image)
 
         # Step 2: Split into chunks
         chunks = split_into_chunks(text)

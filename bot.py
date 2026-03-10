@@ -91,7 +91,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• PDF documents (.pdf)\n"
             "• Text files (.txt)\n"
             "• Word documents (.docx)\n"
-            "• CSV files (.csv)\n\n"
+            "• CSV files (.csv)\n"
             "• Photos and screenshots 🖼️\n\n"
             f"Maximum file size: {MAX_FILE_SIZE_MB}MB",
             reply_markup=InlineKeyboardMarkup([
