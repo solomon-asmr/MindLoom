@@ -1,4 +1,5 @@
 import chromadb
+from rank_bm25 import BM25Okapi
 from config import CHROMA_DB_PATH
 # Create ONE client that all functions share
 chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
@@ -49,7 +50,7 @@ def add_to_collection(user_id, chunks, source_name, source_type):
     return len(chunks)
 
 def search_collection(user_id, query, top_k=3):
-    """Search a user's collection for relevant chunks.
+    """Hybrid search: combines vector search and BM25 keyword search.
     
     Args:
         user_id: Telegram user ID
@@ -61,25 +62,84 @@ def search_collection(user_id, query, top_k=3):
     """
     collection = get_user_collection(user_id)
 
-    # Check if collection has any data
     if collection.count() == 0:
         return {"documents": [], "sources": []}
 
-    results = collection.query(
+    total_docs = collection.count()
+    fetch_k = min(top_k * 3, total_docs)  # fetch more for reranking
+
+    # ===== STEP 1: Vector search (semantic) =====
+    vector_results = collection.query(
         query_texts=[query],
-        n_results=min(top_k, collection.count())
+        n_results=fetch_k
     )
 
-    # Extract the documents and their sources
-    documents = results["documents"][0] if results["documents"] else []
+    vector_docs = vector_results["documents"][0] if vector_results["documents"] else []
+    vector_ids = vector_results["ids"][0] if vector_results["ids"] else []
+    vector_metadatas = vector_results["metadatas"][0] if vector_results["metadatas"] else []
 
-    # Get unique source names from metadata
+    if not vector_docs:
+        return {"documents": [], "sources": []}
+
+    # ===== STEP 2: BM25 keyword search =====
+    # Get ALL documents for BM25 (it needs the full corpus)
+    all_data = collection.get(include=["documents", "metadatas"])
+    all_docs = all_data["documents"]
+    all_ids = all_data["ids"]
+    all_metadatas = all_data["metadatas"]
+
+    # Tokenize documents for BM25 (split into words)
+    tokenized_corpus = [doc.lower().split() for doc in all_docs]
+    tokenized_query = query.lower().split()
+
+    # Create BM25 index and get scores
+    bm25 = BM25Okapi(tokenized_corpus)
+    bm25_scores = bm25.get_scores(tokenized_query)
+
+    # Get top BM25 results
+    bm25_top_indices = sorted(
+        range(len(bm25_scores)),
+        key=lambda i: bm25_scores[i],
+        reverse=True
+    )[:fetch_k]
+
+    bm25_docs = [all_docs[i] for i in bm25_top_indices]
+    bm25_ids = [all_ids[i] for i in bm25_top_indices]
+    bm25_metadatas = [all_metadatas[i] for i in bm25_top_indices]
+
+    # ===== STEP 3: Reciprocal Rank Fusion =====
+    rrf_scores = {}  # doc_id → score
+    doc_map = {}     # doc_id → {document, metadata}
+    k = 60  # RRF constant
+
+    # Score vector results
+    for rank, doc_id in enumerate(vector_ids):
+        rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1.0 / (rank + k)
+        doc_map[doc_id] = {
+            "document": vector_docs[rank],
+            "metadata": vector_metadatas[rank]
+        }
+
+    # Score BM25 results
+    for rank, doc_id in enumerate(bm25_ids):
+        rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1.0 / (rank + k)
+        if doc_id not in doc_map:
+            doc_map[doc_id] = {
+                "document": bm25_docs[rank],
+                "metadata": bm25_metadatas[rank]
+            }
+
+    # ===== STEP 4: Sort by combined score and return top_k =====
+    sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
+    top_ids = sorted_ids[:top_k]
+
+    documents = [doc_map[doc_id]["document"] for doc_id in top_ids]
+
     sources = []
-    if results["metadatas"] and results["metadatas"][0]:
-        for metadata in results["metadatas"][0]:
-            source = metadata.get("source", "Unknown")
-            if source not in sources:
-                sources.append(source)
+    for doc_id in top_ids:
+        source = doc_map[doc_id]["metadata"].get("source", "Unknown")
+        if source not in sources:
+            sources.append(source)
 
     return {
         "documents": documents,
