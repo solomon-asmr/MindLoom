@@ -505,6 +505,90 @@ def ask_question(user_id, question):
             "categories_searched": categories
         }
 
+def ask_question_stream(user_id, question):
+    """Search and generate an answer with streaming.
+    
+    Yields chunks of text as they're generated.
+    Also yields a final dict with metadata.
+    
+    Usage:
+        for chunk in ask_question_stream(user_id, question):
+            if isinstance(chunk, dict):
+                # Final metadata (sources, categories, etc.)
+                metadata = chunk
+            else:
+                # Text chunk to display
+                print(chunk, end="")
+    """
+    # Step 0: ROUTE
+    categories = detect_question_categories(question)
+
+    # Step 1: RETRIEVE
+    search_results = search_collection(user_id, question, top_k=TOP_K, categories=categories)
+
+    documents = search_results["documents"]
+    sources = search_results["sources"]
+
+    if not documents:
+        yield "Your knowledge base is empty. Please add some documents or websites first!"
+        yield {"sources": [], "chunks_used": 0, "categories_searched": categories}
+        return
+
+    # Step 2: AUGMENT
+    context = "\n\n".join(documents)
+
+    system_message = {
+        "role": "system",
+        "content": (
+            "You are a helpful personal assistant. "
+            "Answer the question using ONLY the provided context. "
+            "If the context doesn't contain enough information to answer, "
+            "say you don't have enough information in the user's language. "
+            "IMPORTANT: Always answer in the SAME LANGUAGE the user asked in. "
+            "Be clear and concise."
+        )
+    }
+
+    history = get_history(user_id)
+
+    messages = [system_message]
+    messages.extend(history)
+    messages.append({
+        "role": "user",
+        "content": f"Context:\n{context}\n\nQuestion:\n{question}"
+    })
+
+    # Step 3: GENERATE with streaming
+    try:
+        stream = groq_client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=messages,
+            temperature=LLM_TEMPERATURE,
+            stream=True
+        )
+
+        full_answer = ""
+        for chunk in stream:
+            token = chunk.choices[0].delta.content or ""
+            if token:
+                full_answer += token
+                yield token
+
+        # Save to conversation history
+        add_to_history(user_id, "user", question)
+        add_to_history(user_id, "assistant", full_answer)
+
+        # Yield final metadata
+        yield {
+            "sources": sources,
+            "chunks_used": len(documents),
+            "categories_searched": categories
+        }
+
+    except Exception as e:
+        yield f"Sorry, I encountered an error: {str(e)}"
+        yield {"sources": [], "chunks_used": 0, "categories_searched": categories}
+
 
 def detect_category(text):
     """Use the LLM to detect which category a document belongs to.

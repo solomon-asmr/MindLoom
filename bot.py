@@ -1,3 +1,5 @@
+import time
+import asyncio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -6,7 +8,8 @@ from telegram.ext import (
 from rag_engine import (
     process_document, process_url, process_urls,
     ask_question, scan_website, clear_history,
-    transcribe_audio, text_to_speech, process_image
+    transcribe_audio, text_to_speech, process_image,
+    detect_category, ask_question_stream
 )
 from user_manager import (
     get_user_sources, get_user_stats, 
@@ -567,7 +570,7 @@ async def handle_link_selection(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle when a user asks a question."""
+    """Handle when a user asks a question with streaming response."""
     user_id = update.effective_user.id
     question = update.message.text
 
@@ -578,7 +581,6 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Check if user has any data
     stats = get_user_stats(user_id)
     if stats["total_chunks"] == 0:
         await update.message.reply_text(
@@ -594,40 +596,73 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Show typing indicator
-    await send_typing(update)
+    # Send initial message
+    streaming_msg = await update.message.reply_text("🤖 Thinking...")
 
-    result = ask_question(user_id, question)
+    try:
+        full_text = ""
+        metadata = None
+        last_edit_time = time.time()
+        edit_interval = 1.0  # edit message every 1 second
 
-    answer = result["answer"]
-    sources = result["sources"]
+        for chunk in ask_question_stream(user_id, question):
+            if isinstance(chunk, dict):
+                # Final metadata
+                metadata = chunk
+            else:
+                # Text token
+                full_text += chunk
 
-    response = f"🤖 {answer}"
+                # Edit message every 1 second (Telegram rate limit)
+                now = time.time()
+                if now - last_edit_time >= edit_interval:
+                    display = f"🤖 {full_text}"
+                    if len(display) > 4000:
+                        display = display[:4000]
+                    
+                    try:
+                        await streaming_msg.edit_text(display + " ▌")
+                    except Exception:
+                        pass  # ignore edit errors (message unchanged, etc.)
+                    
+                    last_edit_time = now
+                    await asyncio.sleep(0.1)  # small delay to not block
 
-    if sources:
-        response += "\n\n📚 Sources:\n"
-        for source in sources:
-            short = source[:40] + "..." if len(source) > 40 else source
-            response += f"  • {short}\n"
+        # Final edit with complete answer + sources + buttons
+        response = f"🤖 {full_text}"
 
-    categories_searched = result.get("categories_searched", ["all"])
-    if categories_searched and categories_searched != ["all"]:
-        cat_labels = [CATEGORIES.get(c, {}).get("label", c) for c in categories_searched]
-        response += f"\n🔍 Searched: {', '.join(cat_labels)}"
+        if metadata:
+            sources = metadata.get("sources", [])
+            categories_searched = metadata.get("categories_searched", ["all"])
 
-    # Telegram has a 4096 character limit per message
-    if len(response) > 4000:
-        response = response[:4000] + "\n\n... (response truncated)"
+            if sources:
+                response += "\n\n📚 Sources:\n"
+                for source in sources:
+                    short = source[:40] + "..." if len(source) > 40 else source
+                    response += f"  • {short}\n"
 
-    await update.message.reply_text(
-        response,
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("❓ Ask Another", callback_data="ask"),
-                InlineKeyboardButton("🔙 Menu", callback_data="menu"),
-            ]
-        ])
-    )
+            if categories_searched and categories_searched != ["all"]:
+                cat_labels = [CATEGORIES.get(c, {}).get("label", c) for c in categories_searched]
+                response += f"\n🔍 Searched: {', '.join(cat_labels)}"
+
+        if len(response) > 4000:
+            response = response[:4000] + "\n\n... (truncated)"
+
+        await streaming_msg.edit_text(
+            response,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("❓ Ask Another", callback_data="ask"),
+                    InlineKeyboardButton("🔙 Menu", callback_data="menu"),
+                ]
+            ])
+        )
+
+    except Exception as e:
+        await streaming_msg.edit_text(
+            "❌ Something went wrong. Please try again.",
+            reply_markup=get_main_menu()
+        )
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle when a user sends a voice message."""
